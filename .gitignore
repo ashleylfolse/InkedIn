@@ -1,0 +1,5 @@
+venv/
+__pycache__/
+*.pyc
+.totp_secret
+qrcode.png

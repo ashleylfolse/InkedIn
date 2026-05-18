@@ -1,0 +1,142 @@
+#!/usr/bin/env python3
+
+import argparse
+import base64
+import hashlib
+import hmac
+import os
+import struct
+import sys
+import time
+import urllib.parse
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+VENV_PYTHON = os.path.join(SCRIPT_DIR, "venv", "bin", "python3")
+if os.path.exists(VENV_PYTHON) and sys.executable != VENV_PYTHON:
+    os.execv(VENV_PYTHON, [VENV_PYTHON] + sys.argv)
+
+SECRET_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".totp_secret")
+DEFAULT_ISSUER = "InkedIn"
+DEFAULT_USER = "user@inkedin.com"
+QR_FILENAME = "qrcode.png"
+PERIOD = 30
+DIGITS = 6
+
+
+def generate_secret(length=20):
+    return base64.b32encode(os.urandom(length)).decode("ascii").rstrip("=")
+
+
+def load_or_create_secret():
+    if os.path.exists(SECRET_FILE):
+        with open(SECRET_FILE, "r") as f:
+            return f.read().strip()
+    secret = generate_secret()
+    with open(SECRET_FILE, "w") as f:
+        f.write(secret)
+    return secret
+
+
+def pad_base32(secret):
+    missing = (8 - len(secret) % 8) % 8
+    return secret + "=" * missing
+
+
+def compute_totp(secret_b32, period=PERIOD, digits=DIGITS):
+    key = base64.b32decode(pad_base32(secret_b32.upper()))
+    counter = int(time.time()) // period
+    counter_bytes = struct.pack(">Q", counter)
+    mac = hmac.new(key, counter_bytes, hashlib.sha1).digest()
+    offset = mac[-1] & 0x0F
+    truncated = struct.unpack(">I", mac[offset : offset + 4])[0] & 0x7FFFFFFF
+    otp = truncated % (10**digits)
+    return str(otp).zfill(digits)
+
+
+def seconds_remaining(period=PERIOD):
+    return period - (int(time.time()) % period)
+
+
+def build_uri(secret, user=DEFAULT_USER, issuer=DEFAULT_ISSUER):
+    label = urllib.parse.quote(f"{issuer}:{user}", safe=":")
+    params = urllib.parse.urlencode(
+        {
+            "secret": secret,
+            "issuer": issuer,
+            "algorithm": "SHA1",
+            "digits": DIGITS,
+            "period": PERIOD,
+        }
+    )
+    return f"otpauth://totp/{label}?{params}"
+
+
+def do_generate_qr(args):
+    try:
+        import qrcode
+    except ImportError:
+        print("Error: qrcode library not installed. Run: make", file=sys.stderr)
+        sys.exit(1)
+
+    secret = load_or_create_secret()
+    uri = build_uri(secret, user=args.user, issuer=args.issuer)
+
+    qr = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_M)
+    qr.add_data(uri)
+    qr.make(fit=True)
+
+    img = qr.make_image(fill_color="black", back_color="white")
+    output = args.output or QR_FILENAME
+    img.save(output)
+
+    print(f"QR code saved to: {output}")
+    print(f"Secret: {secret}")
+    print(f"URI: {uri}")
+    print(f"\nScan the QR code with Google Authenticator, then run:")
+    print(f"  ./submission --get-otp")
+
+
+def do_get_otp(args):
+    if not os.path.exists(SECRET_FILE):
+        print("No secret found. Run --generate-qr first.", file=sys.stderr)
+        sys.exit(1)
+
+    secret = load_or_create_secret()
+
+    if args.loop:
+        print(f"Generating OTPs every {PERIOD}s (Ctrl+C to stop)\n")
+        try:
+            while True:
+                otp = compute_totp(secret)
+                remaining = seconds_remaining()
+                print(f"OTP: {otp}  (valid for {remaining}s)")
+                time.sleep(remaining)
+        except KeyboardInterrupt:
+            print("\nStopped.")
+    else:
+        otp = compute_totp(secret)
+        remaining = seconds_remaining()
+        print(f"{otp}")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="TOTP generator compatible with Google Authenticator")
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("--generate-qr", action="store_true", help="Generate a QR code for Google Authenticator")
+    group.add_argument("--get-otp", action="store_true", help="Print the current TOTP code")
+
+    parser.add_argument("--user", default=DEFAULT_USER, help=f"Account name (default: {DEFAULT_USER})")
+    parser.add_argument("--issuer", default=DEFAULT_ISSUER, help=f"Issuer name (default: {DEFAULT_ISSUER})")
+    parser.add_argument("--output", help="Output filename for QR code (default: qrcode.png)")
+    parser.add_argument("--loop", action="store_true", help="Continuously print OTPs every 30 seconds")
+
+    args = parser.parse_args()
+
+    if args.generate_qr:
+        do_generate_qr(args)
+    elif args.get_otp:
+        do_get_otp(args)
+
+
+if __name__ == "__main__":
+    main()
