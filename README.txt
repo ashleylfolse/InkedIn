@@ -51,7 +51,7 @@ Usage
 
 How It Works
 ------------
-The workflow is:
+The flow is:
 
 1. Run --generate-qr. This generates a random 160-bit secret (base32
    encoded) and saves it to .totp_secret. It builds an otpauth:// URI
